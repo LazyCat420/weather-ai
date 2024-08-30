@@ -148,3 +148,75 @@ export function getStockPrice(name: string) {
   }
   return total / 100
 }
+
+export async function getCoordinates(location: string): Promise<{ lat: string; lon: string }> {
+  // TODO: Implement actual geocoding logic here
+  // For now, we'll return dummy coordinates for San Francisco
+  return { lat: '37.7749', lon: '-122.4194' };
+}
+
+export async function runOllamaCompletion(
+  messages: Array<{ role: string; content: string }>,
+  functions: Array<{ name: string; parameters: z.ZodType<any, any> }>
+) {
+  const response = await fetch('http://10.0.0.29:11434/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'llama3.1:8b',
+      messages: messages,
+      stream: true,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  return {
+    async *streamCompletion() {
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (line.trim() !== '') {
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed.message?.content) {
+                  yield parsed.message.content;
+                }
+              } catch (e) {
+                console.error('Error parsing JSON:', e);
+              }
+            }
+          }
+        }
+      }
+    },
+    parseForFunctionCalls(content: string) {
+      for (const func of functions) {
+        if (content.includes(func.name)) {
+          const match = content.match(new RegExp(`${func.name}\\s*\\((.*?)\\)`, 's'));
+          if (match) {
+            try {
+              const args = JSON.parse(match[1]);
+              const parsed = func.parameters.safeParse(args);
+              if (parsed.success) {
+                return { name: func.name, arguments: parsed.data };
+              }
+            } catch (e) {
+              console.error(`Error parsing arguments for ${func.name}:`, e);
+            }
+          }
+        }
+      }
+      return null;
+    }
+  };
+}

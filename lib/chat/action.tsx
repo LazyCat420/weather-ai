@@ -1,24 +1,22 @@
 import 'server-only'
-
 import { z } from 'zod'
-import OpenAI from 'openai'
-import { runOpenAICompletion } from '@/lib/utils'
 import { createAI, createStreamableUI, getMutableAIState } from 'ai/rsc'
+import { getDailyForecast, getHourlyData } from '@/app/actions'
+import { WeatherMap } from '@/components/llm-weather/weather-map'
+import { getCoordinates } from '@/lib/utils'
 
 // Components
-import { WeatherMap } from '@/components/llm-weather/weather-map'
 import {
   BotCard,
   BotMessage,
   BotMessageText
 } from '@/components/llm-weather/message'
 import { spinner } from '@/components/llm-weather/spinner'
-import { getDailyForecast, getHourlyData } from '@/app/actions'
 import Temperature from '@/components/llm-weather/weather-temperature'
 import { DailyForecast } from '@/components/llm-weather/weather-daily-forecast'
 import { HourlyForecast } from '@/components/llm-weather/weather-hourly-forecast'
 
-// TODO Create a component to ask user for their location
+const WeatherLayer = z.enum(['temperature', 'rain', 'wind', 'clouds', 'pressure'])
 
 const SYSTEM_PROMPT = `
 
@@ -36,34 +34,6 @@ If the user inquires about the weather later today or the hourly forecast, call 
 
 Besides that, you can also chat with users about weather advisories, suggest activities based on the weather, and provide detailed forecasts if needed.`
 
-const HOURLY_SYSTEM_PROMPT = `
-You are a weather chat bot and you can help users check weather conditions, step by step. You and the user can discuss weather forecasts for different locations, if the user doesn't select a city or region assume the user is asking about the weather in their current location (above).
-
-The user just asked for the hourly forecast for a specific location. You provided the user with the hourly weather forecast for the next few hours.
-
-Write a short summary of the weather data to display on top of the hourly forecast chat. DON'T RESPOND WITH ANY DATA, JUST WRITE A SUMMARY.
-
-EXAMPLE: "Here's the hourly forecast for the next few hours in [location]. The temperature will be [temperature] and it will feel like [feels like temperature]. There will be [weather condition] with a [percentage] chance of rain.
-`
-
-const DAILY_SYSTEM_PROMPT = `
-You are a weather chat bot and you can help users check weather conditions, step by step. You and the user can discuss weather forecasts for different locations, if the user doesn't select a city or region assume the user is asking about the weather in their current location (above).
-
-The user just asked for the daily forecast for a specific location. You provided the user with the daily weather forecast for the next few days. DON'T RESPOND WITH ANY DATA, JUST WRITE A SUMMARY.
-
-EXAMPLE: "Here's the daily forecast for the next few days in [location].
-`
-
-const WeatherLayer = z.enum([
-  'temperature',
-  'rain',
-  'wind',
-  'clouds',
-  'pressure'
-])
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || '' })
-
 async function submitUserMessage(content: string) {
   'use server'
 
@@ -80,334 +50,115 @@ async function submitUserMessage(content: string) {
     <BotMessage className="items-center">{spinner}</BotMessage>
   )
 
-  const completion = runOpenAICompletion(openai, {
-    model: 'gpt-3.5-turbo',
-    stream: true,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...aiState.get().map((info: any) => ({
-        role: info.role,
-        content: info.content,
-        name: info.name
-      }))
-    ],
-    functions: [
-      {
-        name: 'show_daily_forecast',
-        description:
-          'displays the daily weather forecast for a specified location.',
-        parameters: z.object({
-          lat: z
-            .string()
-            .describe(
-              'The latitude of the location for which the weather map is to be displayed.'
-            ),
-          lon: z
-            .string()
-            .describe(
-              'The longitude of the location for which the weather map is to be displayed.'
-            )
-        })
+  const systemPrompt = {
+    role: "system",
+    content: SYSTEM_PROMPT
+  };
+
+  const messages = [systemPrompt, ...aiState.get()];
+
+  try {
+    const response = await fetch('http://10.0.0.29:11434/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
-      {
-        name: 'show_hourly_forecast',
-        description:
-          'displays the hourly weather forecast for a specified location.',
-        parameters: z.object({
-          lat: z
-            .string()
-            .describe(
-              'The latitude of the location for which the weather map is to be displayed.'
-            ),
-          lon: z
-            .string()
-            .describe(
-              'The longitude of the location for which the weather map is to be displayed.'
-            )
-        })
-      },
-      {
-        name: 'show_weather_map',
-        description:
-          'displays a map showing various weather conditions at a specified location. Users can choose to view the map with layers representing different weather metrics such as temperature, rainfall and thunderstorms, wind speed and direction, cloudiness, or atmospheric pressure. The map is interactive, allowing users to zoom in or out to get a more detailed or broader view of the weather conditions',
-        parameters: z.object({
-          lat: z
-            .string()
-            .describe(
-              'The latitude of the location for which the weather map is to be displayed.'
-            ),
-          lon: z
-            .string()
-            .describe(
-              'The longitude of the location for which the weather map is to be displayed.'
-            ),
-          layer: WeatherLayer.describe(
-            'The weather metric to be displayed on the map'
-          ),
-          zoom: z.number().describe('The zoom level of the map')
-        })
-      },
-      {
-        name: 'show_weather_temperature',
-        description:
-          'displays the current temperature and what it feels like at a specified location.',
-        parameters: z.object({
-          lat: z
-            .string()
-            .describe(
-              'The latitude of the location for which the weather map is to be displayed.'
-            ),
-          lon: z
-            .string()
-            .describe(
-              'The longitude of the location for which the weather map is to be displayed.'
-            )
-        })
-      }
-    ]
-  })
-
-  completion.onTextContent((content: string, isFinal: boolean) => {
-    reply.update(<BotMessageText content={content} />)
-    if (isFinal) {
-      reply.done()
-      aiState.done([...aiState.get(), { role: 'assistant', content }])
-    }
-  })
-
-  completion.onFunctionCall(
-    'show_weather_map',
-    async ({ lat, lon, layer, zoom }) => {
-      const messages: any = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...aiState.get().map((info: any) => ({
-          role: info.role,
-          content: info.content,
-          name: info.name
-        })),
-        {
-          role: 'function',
-          name: 'show_weather_map',
-          content: JSON.stringify({ lat, lon, layer, zoom })
-        }
-      ]
-
-      console.log('mess', messages)
-
-      const stream = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+      body: JSON.stringify({
+        model: 'llama3.1:8b',
+        messages: messages,
         stream: true,
-        messages: messages
-      })
+      }),
+    });
 
-      let content = ''
-      for await (const chunk of stream) {
-        content += chunk.choices[0]?.delta?.content || ''
-        // reply.update(<BotMessage>{content}</BotMessage>)
-        reply.update(<BotMessageText content={content} />)
-      }
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
 
-      reply.done(
-        <div>
-          {/* <BotMessage className="mb-3">{content}</BotMessage> */}
-          <BotMessageText content={content} />
-          <BotCard showAvatar={false}>
-            <WeatherMap
-              latitude={lat}
-              longitude={lon}
-              layer={layer}
-              zoom={zoom}
-            />
-          </BotCard>
-        </div>
-      )
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let streamedContent = '';
 
-      aiState.done([
-        ...aiState.get(),
-        {
-          role: 'function',
-          name: 'show_weather_map',
-          content: JSON.stringify({ message: content, lat, lon, layer, zoom })
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.trim() !== '') {
+            try {
+              const parsed = JSON.parse(line);
+              if (parsed.message) {
+                streamedContent += parsed.message.content;
+                
+                if (/weather map|radar|map/i.test(streamedContent)) {
+                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
+                  const layer = streamedContent.match(/layer:\s*(\w+)/i)?.[1]?.toLowerCase() as z.infer<typeof WeatherLayer> || 'temperature';
+                  const { lat, lon } = await getCoordinates(location);
+                  reply.update(
+                    <BotCard>
+                      <WeatherMap
+                        latitude={lat}
+                        longitude={lon}
+                        layer={layer}
+                        zoom={10}
+                      />
+                    </BotCard>
+                  );
+                } else if (/current weather|temperature|feels like/i.test(streamedContent)) {
+                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
+                  const { lat, lon } = await getCoordinates(location);
+                  const temperatureData = await getHourlyData({ latitude: lat, longitude: lon });
+                  reply.update(
+                    <BotCard>
+                      <Temperature data={temperatureData} />
+                    </BotCard>
+                  );
+                } else if (/daily forecast|next few days/i.test(streamedContent)) {
+                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
+                  const { lat, lon } = await getCoordinates(location);
+                  const forecastData = await getDailyForecast({ latitude: lat, longitude: lon });
+                  reply.update(
+                    <BotCard>
+                      <DailyForecast data={forecastData} />
+                    </BotCard>
+                  );
+                } else if (/hourly forecast|later today/i.test(streamedContent)) {
+                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
+                  const { lat, lon } = await getCoordinates(location);
+                  const hourlyData = await getHourlyData({ latitude: lat, longitude: lon });
+                  reply.update(
+                    <BotCard>
+                      <HourlyForecast data={hourlyData} />
+                    </BotCard>
+                  );
+                } else {
+                  reply.update(<BotMessageText content={streamedContent} />);
+                }
+              }
+            } catch (e) {
+              console.error('Error parsing JSON:', e);
+            }
+          }
         }
-      ])
-    }
-  )
-
-  completion.onFunctionCall('show_daily_forecast', async ({ lat, lon }) => {
-    const data = await getDailyForecast({
-      latitude: lat,
-      longitude: lon
-    })
-
-    const messages: any = [
-      { role: 'system', content: DAILY_SYSTEM_PROMPT },
-      ...aiState.get().map((info: any) => ({
-        role: info.role,
-        content: info.content,
-        name: info.name
-      })),
-      {
-        role: 'function',
-        name: 'show_daily_forecast',
-        content: JSON.stringify({ data })
       }
-    ]
-
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      stream: true,
-      messages: messages
-    })
-
-    let content = ''
-    for await (const chunk of stream) {
-      content += chunk.choices[0]?.delta?.content || ''
-      reply.update(<BotMessageText content={content} />)
     }
 
-    reply.done(
-      <div>
-        {/* <BotMessage className="mb-3">{content}</BotMessage> */}
-        <BotMessageText content={content} />
-        <BotCard showAvatar={false}>
-          <DailyForecast className="" data={data} />
-        </BotCard>
-      </div>
-    )
+    reply.done();
+    aiState.done([...aiState.get(), { role: 'assistant', content: streamedContent }]);
 
-    aiState.done([
-      ...aiState.get(),
-      {
-        role: 'function',
-        name: 'show_daily_forecast',
-        content: JSON.stringify({ message: content, data })
-      }
-    ])
-  })
-
-  completion.onFunctionCall('show_hourly_forecast', async ({ lat, lon }) => {
-    const data = await getHourlyData({
-      latitude: lat,
-      longitude: lon
-    })
-
-    const messages: any = [
-      { role: 'system', content: HOURLY_SYSTEM_PROMPT },
-      ...aiState.get().map((info: any) => ({
-        role: info.role,
-        content: info.content,
-        name: info.name
-      })),
-      {
-        role: 'function',
-        name: 'show_hourly_forecast',
-        content: JSON.stringify({ data })
-      }
-    ]
-
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
-      stream: true,
-      messages: messages
-    })
-
-    let content = ''
-    for await (const chunk of stream) {
-      content += chunk.choices[0]?.delta?.content || ''
-      reply.update(<BotMessageText content={content} />)
-    }
-
-    reply.done(
-      <div>
-        {/* <BotMessage className="mb-3">{content}</BotMessage> */}
-        <BotMessageText content={content} />
-        <BotCard showAvatar={false}>
-          <HourlyForecast data={data.list} />
-        </BotCard>
-      </div>
-    )
-
-    aiState.done([
-      ...aiState.get(),
-      {
-        role: 'function',
-        name: 'show_hourly_forecast',
-        content: JSON.stringify({ message: content, data })
-      }
-    ])
-  })
-
-  completion.onFunctionCall(
-    'show_weather_temperature',
-    async ({ lat, lon }) => {
-      // console.log('cord', { lat, lon })
-
-      const data = await getHourlyData({
-        latitude: lat,
-        longitude: lon
-      })
-
-      // console.log('getHourlyData Data from actions', data)
-
-      const messages: any = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...aiState.get().map((info: any) => ({
-          role: info.role,
-          content: info.content,
-          name: info.name
-        })),
-        {
-          role: 'function',
-          name: 'show_weather_temperature',
-          content: JSON.stringify({
-            data: data.list[0],
-            city: data.city
-          })
-        }
-      ]
-
-      const stream = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        stream: true,
-        messages: messages
-      })
-
-      reply.update(<BotMessage className="items-center">{spinner}</BotMessage>)
-
-      let content = ''
-      for await (const chunk of stream) {
-        content += chunk.choices[0]?.delta?.content || ''
-        reply.update(<BotMessage>{content}</BotMessage>)
-      }
-
-      reply.done(
-        <div>
-          <BotMessage className="mb-3">{content}</BotMessage>
-          <BotCard showAvatar={false}>
-            <Temperature data={data} />
-          </BotCard>
-        </div>
-      )
-
-      aiState.done([
-        ...aiState.get(),
-        {
-          role: 'function',
-          name: 'show_weather_temperature',
-          content: JSON.stringify({
-            message: content,
-            data: data.list[0],
-            city: data.city
-          })
-        }
-      ])
-    }
-  )
-
-  return {
-    id: Date.now(),
-    display: reply.value
+    return {
+      id: Date.now(),
+      display: reply.value
+    };
+  } catch (error) {
+    console.error('Error:', error);
+    reply.done(<BotMessageText content="Sorry, I'm having trouble connecting. Please try again later." />);
+    return {
+      id: Date.now(),
+      display: reply.value
+    };
   }
 }
 

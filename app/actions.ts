@@ -20,12 +20,10 @@ export async function getUVData({ latitude, longitude }: coordinates) {
 
 // prettier-ignore
 export async function getDailyForecast({ latitude, longitude }: coordinates): Promise<DailyForecastResponse> {
-  //  `${process.env.VERCEL_URL}/api/weather/daily_forecast?lat=${latitude}&lon=${longitude}`
-
   console.log('Called getDailyForecast')
 
   const data = await fetch(
-    `${API_ENDPOINT}/api/weather/daily_forecast?lat=${latitude}&lon=${longitude}&appid=${API_KEY}`
+    `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${latitude}&lon=${longitude}&cnt=10&units=metric&appid=${API_KEY}`
   )
 
   if (!data.ok) throw new Error('Failed to fetch data')
@@ -35,17 +33,26 @@ export async function getDailyForecast({ latitude, longitude }: coordinates): Pr
 
 // prettier-ignore
 export async function getHourlyData({ latitude, longitude }: coordinates): Promise<HourlyForecastResponse> {
-  // `http://localhost:3000/api/hourly_forecast?lat=${latitude}&lon=${longitude}`
-
   console.log('Called getHourlyData')
+  console.log('API_ENDPOINT:', API_ENDPOINT)
+  console.log('API_KEY:', API_KEY ? 'Set' : 'Not set')
 
-  const data = await fetch(
-    `${API_ENDPOINT}/api/weather/hourly?lat=${latitude}&lon=${longitude}&appid=${API_KEY}`
-  )
+  const url = `${API_ENDPOINT}/forecast?lat=${latitude}&lon=${longitude}&appid=${API_KEY}&units=metric`
+  console.log('Fetching from URL:', url)
 
-  if (!data.ok) throw new Error('Failed to fetch data')
-
-  return data.json()
+  try {
+    const response = await fetch(url)
+    if (!response.ok) {
+      console.log('Response not OK. Status:', response.status)
+      console.log('Response text:', await response.text())
+      throw new Error(`Failed to fetch data: ${response.status} ${response.statusText}`)
+    }
+    const data = await response.json()
+    return data
+  } catch (error) {
+    console.error('Fetch error:', error)
+    throw error
+  }
 }
 
 // prettier-ignore
