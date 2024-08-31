@@ -19,20 +19,19 @@ import { HourlyForecast } from '@/components/llm-weather/weather-hourly-forecast
 const WeatherLayer = z.enum(['temperature', 'rain', 'wind', 'clouds', 'pressure'])
 
 const SYSTEM_PROMPT = `
+You are a weather chat bot that helps users check weather conditions step by step. You can discuss weather forecasts for different locations.
 
-THE user current location is *"San Francisco"*
+When a user asks about the weather, temperature, or forecast for a specific location, always mention the location in your response.
 
-You are a weather chat bot and you can help users check weather conditions, step by step. You and the user can discuss weather forecasts for different locations, if the user doesn't select a city or region assume the user is asking about the weather in their current location (above).
+If the user asks to see a weather map or radar, mention "show_weather_map" in your response.
 
-If the user inquires to see a weather map or radar, call \`show_weather_map\` with their specified or assumed location and chosen weather layer based on the context of the conversation (e.g., temperature, rain, wind, clouds, pressure) to display the map.
+If the user asks about the current weather, temperature, or what it feels like, mention "show_weather_temperature" in your response.
 
-If the user inquires specifically about the current weather or current temperature or what the temperature feels like, call \`show_weather_temperature\` with the specified or assumed location to display the current temperature and the 'feels like' temperature.
+If the user asks about the daily forecast for the next few days, mention "show_daily_forecast" in your response.
 
-If users inquires in the daily forecast for the next few days, call \`show_daily_forecast\` with the specified or assumed location to display the daily weather forecast. This can help users plan their activities and prepare for the weather ahead.
+If the user asks about the weather later today or the hourly forecast, mention "show_hourly_forecast" in your response.
 
-If the user inquires about the weather later today or the hourly forecast, call \`show_hourly_forecast\` with the specified or assumed location to display the hourly weather forecast. This can help users plan their day and know what to expect hour by hour.
-
-Besides that, you can also chat with users about weather advisories, suggest activities based on the weather, and provide detailed forecasts if needed.`
+You can also chat about weather advisories, suggest activities based on the weather, and provide detailed forecasts if needed.`
 
 async function submitUserMessage(content: string) {
   'use server'
@@ -82,76 +81,85 @@ async function submitUserMessage(content: string) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.trim() !== '') {
-            try {
-              const parsed = JSON.parse(line);
-              if (parsed.message) {
-                streamedContent += parsed.message.content;
-                
-                if (/weather map|radar|map/i.test(streamedContent)) {
-                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
-                  const layer = streamedContent.match(/layer:\s*(\w+)/i)?.[1]?.toLowerCase() as z.infer<typeof WeatherLayer> || 'temperature';
-                  const { lat, lon } = await getCoordinates(location);
-                  reply.update(
-                    <BotCard>
-                      <WeatherMap
-                        latitude={lat}
-                        longitude={lon}
-                        layer={layer}
-                        zoom={10}
-                      />
-                    </BotCard>
-                  );
-                } else if (/current weather|temperature|feels like/i.test(streamedContent)) {
-                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
-                  const { lat, lon } = await getCoordinates(location);
-                  const temperatureData = await getHourlyData({ latitude: lat, longitude: lon });
-                  reply.update(
-                    <BotCard>
-                      <Temperature data={temperatureData} />
-                    </BotCard>
-                  );
-                } else if (/daily forecast|next few days/i.test(streamedContent)) {
-                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
-                  const { lat, lon } = await getCoordinates(location);
-                  const forecastData = await getDailyForecast({ latitude: lat, longitude: lon });
-                  reply.update(
-                    <BotCard>
-                      <DailyForecast data={forecastData} />
-                    </BotCard>
-                  );
-                } else if (/hourly forecast|later today/i.test(streamedContent)) {
-                  const location = streamedContent.match(/location:\s*([^,\n]+)/i)?.[1]?.trim() || 'San Francisco';
-                  const { lat, lon } = await getCoordinates(location);
-                  const hourlyData = await getHourlyData({ latitude: lat, longitude: lon });
-                  reply.update(
-                    <BotCard>
-                      <HourlyForecast data={hourlyData} />
-                    </BotCard>
-                  );
-                } else {
-                  reply.update(<BotMessageText content={streamedContent} />);
-                }
-              }
-            } catch (e) {
-              console.error('Error parsing JSON:', e);
-            }
+        try {
+          const jsonChunk = JSON.parse(chunk);
+          if (jsonChunk.message && jsonChunk.message.content) {
+            streamedContent += jsonChunk.message.content;
+            reply.update(<BotMessageText content={streamedContent} />);
           }
+        } catch (e) {
+          console.error('Error parsing JSON chunk:', e);
         }
       }
     }
 
-    reply.done();
-    aiState.done([...aiState.get(), { role: 'assistant', content: streamedContent }]);
+    // Extract location from user's message or AI's response
+    const locationMatch = content.match(/(?:in|at|for|of)\s+([^?.,]+)/i) || streamedContent.match(/(?:in|at|for|of)\s+([^?.,]+)/i);
+    const userLocation = locationMatch ? locationMatch[1].trim() : null;
 
-    return {
-      id: Date.now(),
-      display: reply.value
-    };
+    if (userLocation) {
+      const { lat, lon } = await getCoordinates(userLocation);
+
+      let additionalContent = null;
+
+      if (/weather|temperature|forecast|map|radar/i.test(content)) {
+        if (/map|radar/i.test(content)) {
+          const layer = 'temperature'; // Default to temperature layer
+          additionalContent = (
+            <BotCard>
+              <WeatherMap
+                latitude={lat}
+                longitude={lon}
+                layer={layer}
+                zoom={10}
+              />
+            </BotCard>
+          );
+        } else if (/daily forecast|next few days/i.test(content)) {
+          const forecastData = await getDailyForecast({ latitude: lat.toString(), longitude: lon.toString() });
+          additionalContent = (
+            <BotCard>
+              <DailyForecast data={forecastData} />
+            </BotCard>
+          );
+        } else if (/hourly forecast|later today/i.test(content)) {
+          const hourlyData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
+          additionalContent = (
+            <BotCard>
+              <HourlyForecast data={hourlyData} />
+            </BotCard>
+          );
+        } else {
+          const temperatureData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
+          additionalContent = (
+            <BotCard>
+              <Temperature data={temperatureData} />
+            </BotCard>
+          );
+        }
+      }
+
+      reply.update(
+        <>
+          <BotMessageText content={streamedContent} />
+          {additionalContent}
+        </>
+      );
+      reply.done();
+      aiState.done([...aiState.get(), { role: 'assistant', content: streamedContent }]);
+
+      return {
+        id: Date.now(),
+        display: reply.value
+      };
+    } else {
+      reply.done(<BotMessageText content="I'm sorry, but I couldn't determine the location you're asking about. Could you please specify the city or location you want the weather information for?" />);
+      return {
+        id: Date.now(),
+        display: reply.value
+      };
+    }
   } catch (error) {
     console.error('Error:', error);
     reply.done(<BotMessageText content="Sorry, I'm having trouble connecting. Please try again later." />);
