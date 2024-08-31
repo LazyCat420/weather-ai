@@ -8,6 +8,7 @@ import zodToJsonSchema from 'zod-to-json-schema'
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { z } from 'zod'
+import fetch from 'node-fetch';
 
 const consumeStream = async (stream: ReadableStream) => {
   const reader = stream.getReader()
@@ -150,9 +151,20 @@ export function getStockPrice(name: string) {
 }
 
 export async function getCoordinates(location: string): Promise<{ lat: string; lon: string }> {
-  // TODO: Implement actual geocoding logic here
-  // For now, we'll return dummy coordinates for San Francisco
-  return { lat: '37.7749', lon: '-122.4194' };
+  const API_KEY = process.env.OPENCAGE_API_KEY;
+  const response = await fetch(`https://api.opencagedata.com/geocode/v1/json?q=${encodeURIComponent(location)}&key=${API_KEY}`);
+  
+  if (!response.ok) {
+    throw new Error('Failed to fetch coordinates');
+  }
+
+  const data = await response.json();
+  if (data.results.length === 0) {
+    throw new Error('No results found for the given location');
+  }
+
+  const { lat, lng } = data.results[0].geometry;
+  return { lat: lat.toString(), lon: lng.toString() };
 }
 
 export async function runOllamaCompletion(

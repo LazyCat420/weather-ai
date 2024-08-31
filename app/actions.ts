@@ -23,7 +23,7 @@ export async function getDailyForecast({ latitude, longitude }: coordinates): Pr
   console.log('Called getDailyForecast')
 
   const data = await fetch(
-    `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${latitude}&lon=${longitude}&cnt=10&units=metric&appid=${API_KEY}`
+    `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${latitude}&lon=${longitude}&cnt=10&units=imperial&appid=${API_KEY}`
   )
 
   if (!data.ok) throw new Error('Failed to fetch data')
@@ -37,7 +37,7 @@ export async function getHourlyData({ latitude, longitude }: coordinates): Promi
   console.log('API_ENDPOINT:', API_ENDPOINT)
   console.log('API_KEY:', API_KEY ? 'Set' : 'Not set')
 
-  const url = `${API_ENDPOINT}/forecast?lat=${latitude}&lon=${longitude}&appid=${API_KEY}&units=metric`
+  const url = `${API_ENDPOINT}/forecast?lat=${latitude}&lon=${longitude}&appid=${API_KEY}&units=imperial`
   console.log('Fetching from URL:', url)
 
   try {

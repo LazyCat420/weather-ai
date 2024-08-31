@@ -13,7 +13,7 @@ export async function GET(request: Request) {
   }
 
   const response = await fetch(
-    `https://pro.openweathermap.org/data/2.5/forecast/hourly?lat=${latitude}&lon=${longitude}&cnt=${HOURS}&units=metric&appid=${API_KEY}`,
+    `https://pro.openweathermap.org/data/2.5/forecast/hourly?lat=${latitude}&lon=${longitude}&cnt=${HOURS}&units=imperial&appid=${API_KEY}`,
     { next: { revalidate: 900 } }
   )
 
