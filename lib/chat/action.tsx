@@ -19,19 +19,15 @@ import { HourlyForecast } from '@/components/llm-weather/weather-hourly-forecast
 const WeatherLayer = z.enum(['temperature', 'rain', 'wind', 'clouds', 'pressure'])
 
 const SYSTEM_PROMPT = `
-You are a weather chat bot that helps users check weather conditions step by step. You can discuss weather forecasts for different locations.
+You are a weather chat bot that helps users check weather conditions. You can discuss weather forecasts for different locations.
 
-When a user asks about the weather, temperature, or forecast for a specific location, always mention the location in your response.
+When a user asks about the weather, temperature, or forecast for a specific location, always use the get_weather_data tool to fetch accurate information.
 
-If the user asks to see a weather map or radar, mention "show_weather_map" in your response.
+After receiving the weather data, provide a natural language response that includes the information.
 
-If the user asks about the current weather, temperature, or what it feels like, mention "show_weather_temperature" in your response.
+You can also chat about weather advisories, suggest activities based on the weather, and provide detailed forecasts if needed.
 
-If the user asks about the daily forecast for the next few days, mention "show_daily_forecast" in your response.
-
-If the user asks about the weather later today or the hourly forecast, mention "show_hourly_forecast" in your response.
-
-You can also chat about weather advisories, suggest activities based on the weather, and provide detailed forecasts if needed.`
+Always use the tool to get accurate data before responding to weather-related queries.`
 
 async function submitUserMessage(content: string) {
   'use server'
@@ -49,103 +45,152 @@ async function submitUserMessage(content: string) {
     <BotMessage className="items-center">{spinner}</BotMessage>
   )
 
-  const systemPrompt = {
-    role: "system",
-    content: SYSTEM_PROMPT
-  };
+  // Extract location from user's message
+  const locationMatch = content.match(/(?:in|at|for|of)\s+([^?.,]+)/i);
+  const userLocation = locationMatch ? locationMatch[1].trim() : null;
 
-  const messages = [systemPrompt, ...aiState.get()];
+  if (userLocation) {
+    const { lat, lon } = await getCoordinates(userLocation);
 
-  try {
-    const response = await fetch('http://10.0.0.29:11434/api/chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama3.1:8b',
-        messages: messages,
-        stream: true,
-      }),
-    });
+    let additionalContent = null;
+    let weatherData = null;
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+    if (/weather|temperature|forecast|map|radar/i.test(content)) {
+      if (/map|radar/i.test(content)) {
+        const layer = 'temperature'; // Default to temperature layer
+        additionalContent = (
+          <BotCard>
+            <WeatherMap
+              latitude={lat}
+              longitude={lon}
+              layer={layer}
+              zoom={10}
+            />
+          </BotCard>
+        );
+      } else if (/daily forecast|next few days/i.test(content)) {
+        weatherData = await getDailyForecast({ latitude: lat.toString(), longitude: lon.toString() });
+        additionalContent = (
+          <BotCard>
+            <DailyForecast data={weatherData} />
+          </BotCard>
+        );
+      } else if (/hourly forecast|later today/i.test(content)) {
+        weatherData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
+        additionalContent = (
+          <BotCard>
+            <HourlyForecast data={weatherData} />
+          </BotCard>
+        );
+      } else {
+        weatherData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
+        additionalContent = (
+          <BotCard>
+            <Temperature data={weatherData} />
+          </BotCard>
+        );
+      }
     }
 
-    const reader = response.body?.getReader();
-    const decoder = new TextDecoder();
-    let streamedContent = '';
+    // Display the weather widget first
+    reply.update(
+      <>
+        {additionalContent}
+        <BotMessage className="items-center">{spinner}</BotMessage>
+      </>
+    );
 
-    if (reader) {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        try {
-          const jsonChunk = JSON.parse(chunk);
-          if (jsonChunk.message && jsonChunk.message.content) {
-            streamedContent += jsonChunk.message.content;
-            reply.update(<BotMessageText content={streamedContent} />);
+    // Now generate the LLM response
+    const systemPrompt = {
+      role: "system",
+      content: SYSTEM_PROMPT
+    };
+
+    const messages = [systemPrompt, ...aiState.get()];
+
+    const getWeatherData = {
+      name: "get_weather_data",
+      description: "Get current weather data for a location",
+      parameters: {
+        type: "object",
+        properties: {
+          location: {
+            type: "string",
+            description: "The location to get weather data for"
           }
-        } catch (e) {
-          console.error('Error parsing JSON chunk:', e);
-        }
+        },
+        required: ["location"]
+      },
+      function: async (args: { location: string }) => {
+        const { lat, lon } = await getCoordinates(args.location);
+        const weatherData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
+        return {
+          location: args.location,
+          temperature: weatherData.list[0].main.temp,
+          conditions: weatherData.list[0].weather[0].description
+        };
       }
-    }
+    };
 
-    // Extract location from user's message or AI's response
-    const locationMatch = content.match(/(?:in|at|for|of)\s+([^?.,]+)/i) || streamedContent.match(/(?:in|at|for|of)\s+([^?.,]+)/i);
-    const userLocation = locationMatch ? locationMatch[1].trim() : null;
+    try {
+      const response = await fetch('http://10.0.0.29:11434/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama3.1:8b',
+          messages: messages,
+          stream: true,
+          tools: [getWeatherData],
+          tool_choice: "auto",
+        }),
+      });
 
-    if (userLocation) {
-      const { lat, lon } = await getCoordinates(userLocation);
-
-      let additionalContent = null;
-
-      if (/weather|temperature|forecast|map|radar/i.test(content)) {
-        if (/map|radar/i.test(content)) {
-          const layer = 'temperature'; // Default to temperature layer
-          additionalContent = (
-            <BotCard>
-              <WeatherMap
-                latitude={lat}
-                longitude={lon}
-                layer={layer}
-                zoom={10}
-              />
-            </BotCard>
-          );
-        } else if (/daily forecast|next few days/i.test(content)) {
-          const forecastData = await getDailyForecast({ latitude: lat.toString(), longitude: lon.toString() });
-          additionalContent = (
-            <BotCard>
-              <DailyForecast data={forecastData} />
-            </BotCard>
-          );
-        } else if (/hourly forecast|later today/i.test(content)) {
-          const hourlyData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
-          additionalContent = (
-            <BotCard>
-              <HourlyForecast data={hourlyData} />
-            </BotCard>
-          );
-        } else {
-          const temperatureData = await getHourlyData({ latitude: lat.toString(), longitude: lon.toString() });
-          additionalContent = (
-            <BotCard>
-              <Temperature data={temperatureData} />
-            </BotCard>
-          );
-        }
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      reply.update(
-        <>
-          <BotMessageText content={streamedContent} />
-          {additionalContent}
-        </>
-      );
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let streamedContent = '';
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value);
+          try {
+            const jsonChunk = JSON.parse(chunk);
+            if (jsonChunk.message && jsonChunk.message.content) {
+              streamedContent += jsonChunk.message.content;
+              reply.update(
+                <>
+                  {additionalContent}
+                  <BotMessageText content={streamedContent} />
+                </>
+              );
+            } else if (jsonChunk.message && jsonChunk.message.tool_calls) {
+              const toolCall = jsonChunk.message.tool_calls[0];
+              if (toolCall.function.name === "get_weather_data") {
+                const args = JSON.parse(toolCall.function.arguments);
+                const weatherData = await getWeatherData.function(args);
+                const weatherResponse = `Current weather in ${weatherData.location}: Temperature: ${weatherData.temperature}°F, Conditions: ${weatherData.conditions}`;
+                streamedContent += weatherResponse;
+                reply.update(
+                  <>
+                    {additionalContent}
+                    <BotMessageText content={streamedContent} />
+                  </>
+                );
+              }
+            }
+          } catch (e) {
+            console.error('Error parsing JSON chunk:', e);
+          }
+        }
+      }
+
       reply.done();
       aiState.done([...aiState.get(), { role: 'assistant', content: streamedContent }]);
 
@@ -153,16 +198,16 @@ async function submitUserMessage(content: string) {
         id: Date.now(),
         display: reply.value
       };
-    } else {
-      reply.done(<BotMessageText content="I'm sorry, but I couldn't determine the location you're asking about. Could you please specify the city or location you want the weather information for?" />);
+    } catch (error) {
+      console.error('Error:', error);
+      reply.done(<BotMessageText content="Sorry, I'm having trouble connecting. Please try again later." />);
       return {
         id: Date.now(),
         display: reply.value
       };
     }
-  } catch (error) {
-    console.error('Error:', error);
-    reply.done(<BotMessageText content="Sorry, I'm having trouble connecting. Please try again later." />);
+  } else {
+    reply.done(<BotMessageText content="I'm sorry, but I couldn't determine the location you're asking about. Could you please specify the city or location you want the weather information for?" />);
     return {
       id: Date.now(),
       display: reply.value
